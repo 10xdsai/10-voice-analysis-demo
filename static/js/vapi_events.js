@@ -67,8 +67,12 @@ window.initializeVapiEvents = async (widget) => {
 async function handleVapiCallEnd(callDetail) {
     console.log('[Vapi] Handling call end:', callDetail);
 
-    // Extract recording URL if available immediately
-    const recordingUrl = callDetail?.recordingUrl ||
+    // Extract recording URL (prioritize presigned URLs if available)
+    const recordingUrl = callDetail?.artifact?.presignedMonoUrl ||
+        callDetail?.artifact?.presignedStereoUrl ||
+        callDetail?.presignedMonoUrl ||
+        callDetail?.presignedStereoUrl ||
+        callDetail?.recordingUrl ||
         callDetail?.stereoRecordingUrl ||
         callDetail?.artifact?.recordingUrl;
 

@@ -273,7 +273,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 # --- Supabase Setup ---
 from supabase import create_client, Client
 url: str = os.environ.get("SUPABASE_URL")
-key: str = os.environ.get("SUPABASE_KEY")
+key: str = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY")
 supabase: Client = None
 
 if not url or not key:
@@ -1306,6 +1306,14 @@ async def handle_end_of_call(message: dict, call_data: dict, background_tasks: B
     
     # 2. Trigger Audio Processing (Drive Upload + Analysis)
     recording_url = message.get('recordingUrl') or message.get('recording_url')
+    if not recording_url and 'artifact' in message:
+        artifact = message.get('artifact', {})
+        recording_url = artifact.get('recordingUrl') or artifact.get('recording_url') or artifact.get('stereoRecordingUrl')
+    if not recording_url and 'call' in message:
+        call = message.get('call', {})
+        recording_url = call.get('recordingUrl') or call.get('recording_url')
+        if not recording_url and 'artifact' in call:
+            recording_url = call['artifact'].get('recordingUrl') or call['artifact'].get('recording_url')
     # Fallback to stereo
     if not recording_url:
         recording_url = message.get('stereoRecordingUrl') or message.get('stereo_recording_url')
@@ -2268,11 +2276,51 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         # Download Recording
         # Use run_in_threadpool for blocking I/O
         def download_file():
-            with requests.get(url, stream=True) as r:
-                r.raise_for_status()
-                with open(temp_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+            import re
+            download_url = url
+            
+            # If the recording URL is an unsigned Cloudflare R2 or S3 bucket URL (e.g. HIPAA recordings),
+            # fetch the presigned authenticated URL via Vapi's API
+            if ('r2.cloudflarestorage.com' in download_url or 'hipaa-recordings' in download_url) and 'X-Amz-Signature' not in download_url:
+                try:
+                    match = re.search(r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})', download_url)
+                    extracted_call_id = match.group(1) if match else None
+                    vapi_key = os.environ.get("VAPI_API_KEY")
+                    if extracted_call_id and vapi_key:
+                        print(f"[VAPI] Unsigned storage URL detected. Fetching presigned URL for call {extracted_call_id}...")
+                        vapi_res = requests.get(f"https://api.vapi.ai/call/{extracted_call_id}", headers={"Authorization": f"Bearer {vapi_key}"}, timeout=10)
+                        if vapi_res.status_code == 200:
+                            artifact = vapi_res.json().get('artifact', {})
+                            presigned = artifact.get('presignedMonoUrl') or artifact.get('presignedStereoUrl')
+                            if presigned:
+                                print(f"[VAPI] Successfully fetched presigned recording URL.")
+                                download_url = presigned
+                except Exception as ex:
+                    print(f"[VAPI] Could not fetch presigned URL: {ex}")
+
+            resp = requests.get(download_url, stream=True)
+            # Fallback retry if 400 or 403 returned
+            if resp.status_code in [400, 401, 403] and download_url == url:
+                try:
+                    match = re.search(r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})', url)
+                    extracted_call_id = match.group(1) if match else None
+                    vapi_key = os.environ.get("VAPI_API_KEY")
+                    if extracted_call_id and vapi_key:
+                        print(f"[VAPI] Retrying with presigned URL for call {extracted_call_id}...")
+                        vapi_res = requests.get(f"https://api.vapi.ai/call/{extracted_call_id}", headers={"Authorization": f"Bearer {vapi_key}"}, timeout=10)
+                        if vapi_res.status_code == 200:
+                            artifact = vapi_res.json().get('artifact', {})
+                            presigned = artifact.get('presignedMonoUrl') or artifact.get('presignedStereoUrl')
+                            if presigned:
+                                download_url = presigned
+                                resp = requests.get(download_url, stream=True)
+                except Exception as ex:
+                    print(f"[VAPI] Presigned fallback retry failed: {ex}")
+
+            resp.raise_for_status()
+            with open(temp_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
         
         await run_in_threadpool(download_file)
         
@@ -2413,13 +2461,13 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
         
         # Check common paths where Vapi might put the recording URL
         if isinstance(payload, dict):
-            # Direct recording_url field
-            recording_url = check_obj.get('recording_url') or check_obj.get('recordingUrl')
+            # Direct recording_url field (prioritize presigned URLs)
+            recording_url = check_obj.get('presignedMonoUrl') or check_obj.get('presignedStereoUrl') or check_obj.get('recording_url') or check_obj.get('recordingUrl')
             
             # Nested in artifact
             if not recording_url and 'artifact' in check_obj:
                 artifact = check_obj['artifact']
-                recording_url = artifact.get('recordingUrl') or artifact.get('recording_url')
+                recording_url = artifact.get('presignedMonoUrl') or artifact.get('presignedStereoUrl') or artifact.get('recordingUrl') or artifact.get('recording_url')
             
             # Nested in call object
             if not recording_url and 'call' in check_obj:
