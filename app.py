@@ -1634,7 +1634,7 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
         print("[API STATS] Fetching statistics from database...")
 
         stats_query = supabase.table('calls')\
-            .select("sentiment, duration, tags")\
+            .select("sentiment, duration, tags, summary")\
             .order('id', desc=True)\
             .limit(1000)
         
@@ -1647,8 +1647,12 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
         neu_count = 0
         total_duration = 0
         valid_duration_count = 0
-        tag_counts = {"Support": 0, "Billing": 0, "Technical": 0, "Sales": 0}
+        tag_counts = {"Support": 0, "Billing": 0, "Technical": 0, "Sales": 0, "Feedback": 0}
         
+        cat_labels = ['Support', 'Billing', 'Sales', 'Feedback', 'Technical']
+        cat_resolved = [0] * len(cat_labels)
+        cat_open = [0] * len(cat_labels)
+
         for c in all_data:
             sent = (c.get('sentiment') or 'neutral').lower()
             if sent == 'positive': 
@@ -1663,17 +1667,40 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
                 total_duration += dur
                 valid_duration_count += 1
 
-            tags = c.get('tags', [])
-            if tags:
-                tags_lower = {tag.lower() for tag in tags}
-                if 'support' in tags_lower or 'help' in tags_lower:
-                    tag_counts["Support"] += 1
-                if any(t in tags_lower for t in ['billing', 'payment', 'invoice']):
-                    tag_counts["Billing"] += 1
-                if any(t in tags_lower for t in ['technical', 'technical issue', 'error', 'bug']):
-                    tag_counts["Technical"] += 1
-                if 'sales' in tags_lower:
-                    tag_counts["Sales"] += 1
+            raw_tags = c.get('tags') or []
+            tags_clean = [t.strip().title() for t in raw_tags]
+            tags_lower = {t.lower() for t in raw_tags}
+
+            if 'support' in tags_lower or 'help' in tags_lower:
+                tag_counts["Support"] += 1
+            if any(t in tags_lower for t in ['billing', 'payment', 'invoice']):
+                tag_counts["Billing"] += 1
+            if any(t in tags_lower for t in ['technical', 'technical issue', 'error', 'bug']):
+                tag_counts["Technical"] += 1
+            if 'sales' in tags_lower:
+                tag_counts["Sales"] += 1
+            if 'feedback' in tags_lower:
+                tag_counts["Feedback"] += 1
+
+            # Check if resolved vs open
+            summary_raw = c.get('summary') or ''
+            has_action_items = False
+            try:
+                if summary_raw.startswith('{'):
+                    s_obj = json.loads(summary_raw)
+                    if s_obj.get('action_items') and len(s_obj['action_items']) > 0:
+                        has_action_items = True
+            except:
+                pass
+
+            is_open = (sent == 'negative') or has_action_items
+
+            for i, cat in enumerate(cat_labels):
+                if cat in tags_clean or cat.lower() in tags_lower:
+                    if is_open:
+                        cat_open[i] += 1
+                    else:
+                        cat_resolved[i] += 1
         
         pos_percent = round((pos_count / total_calls) * 100) if total_calls > 0 else 0
         neg_percent = round((neg_count / total_calls) * 100) if total_calls > 0 else 0
@@ -1696,7 +1723,13 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
                 "negative": neg_count,
                 "neutral": neu_count
             },
-            "tag_counts": tag_counts
+            "tag_counts": tag_counts,
+            "categories": {
+                "labels": cat_labels,
+                "resolved": cat_resolved,
+                "open": cat_open,
+                "total": total_calls
+            }
         }
 
         t_end = time.time()

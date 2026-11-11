@@ -1222,7 +1222,7 @@ async function fetchStats() {
                 globalStats = result.stats;
                 console.log('[API CHECK] Stats received:', globalStats);
                 updateStats(globalStats);
-                initializeCategoriesChart(globalStats.tag_counts);
+                initializeCategoriesChart(globalStats.categories || globalStats.tag_counts);
                 initializeSentimentChart();
             }
         }
@@ -1903,15 +1903,28 @@ function initializeCategoriesChart(data) {
 
     const ctx = canvas.getContext('2d');
 
-    // Labels for the categories
-    const labels = ['Support', 'Billing', 'Technical', 'Security', 'Sales'];
-    
-    // Grouped data: Resolved vs Open
-    const resolvedData = [65, 85, 72, 95, 60];
-    const openData = [35, 45, 48, 60, 30];
+    // Default categories
+    let labels = ['Support', 'Billing', 'Sales', 'Feedback', 'Technical'];
+    let resolvedData = [0, 0, 0, 0, 0];
+    let openData = [0, 0, 0, 0, 0];
+    let totalCount = totalCallsCount || 29;
 
-    // Calculate total for the header
-    const totalCount = resolvedData.reduce((a, b) => a + b, 0) + openData.reduce((a, b) => a + b, 0);
+    const source = (data && data.labels) ? data : (globalStats?.categories || null);
+
+    if (source && source.labels) {
+        labels = source.labels;
+        resolvedData = source.resolved || [0, 0, 0, 0, 0];
+        openData = source.open || [0, 0, 0, 0, 0];
+        totalCount = source.total || totalCallsCount || 29;
+    } else if (data && typeof data === 'object') {
+        // Fallback from tag_counts dictionary
+        labels = ['Support', 'Billing', 'Sales', 'Feedback', 'Technical'];
+        resolvedData = labels.map(l => Math.round((data[l] || 0) * 0.7));
+        openData = labels.map(l => Math.round((data[l] || 0) * 0.3));
+        totalCount = totalCallsCount || 29;
+    }
+
+    // Update total count in header to match real calls
     const totalEl = document.getElementById('categories-total-count');
     if (totalEl) totalEl.textContent = totalCount;
 
@@ -1927,6 +1940,9 @@ function initializeCategoriesChart(data) {
     const primaryColor = '#6366f1';
     const secondaryColor = isDark ? 'rgba(99, 102, 241, 0.2)' : 'rgba(99, 102, 241, 0.1)';
     const pattern = createStripePattern(primaryColor);
+
+    const maxVal = Math.max(...resolvedData, ...openData, 10);
+    const yMax = Math.ceil((maxVal + 2) / 5) * 5;
 
     categoriesChart = new Chart(ctx, {
         type: 'bar',
@@ -1980,7 +1996,7 @@ function initializeCategoriesChart(data) {
                     usePointStyle: true,
                     callbacks: {
                         label: function(context) {
-                            return ` ${context.dataset.label}: ${context.raw}%`;
+                            return ` ${context.dataset.label}: ${context.raw} calls`;
                         }
                     }
                 }
@@ -2003,7 +2019,7 @@ function initializeCategoriesChart(data) {
                 },
                 y: {
                     min: 0,
-                    max: 120,
+                    suggestedMax: yMax,
                     grid: {
                         color: gridColor,
                         drawBorder: false,
@@ -2016,9 +2032,9 @@ function initializeCategoriesChart(data) {
                             size: 12,
                             weight: '600'
                         },
-                        stepSize: 30,
+                        stepSize: 5,
                         callback: function(value) {
-                            return value + '%';
+                            return Number.isInteger(value) ? value : '';
                         },
                         padding: 10
                     },
