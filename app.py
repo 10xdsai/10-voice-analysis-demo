@@ -1631,86 +1631,76 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
     
     try:
         t_start = time.time()
-        print("[API STATS] Fetching statistics...")
+        print("[API STATS] Fetching statistics from database...")
 
-        # CRITICAL FIX: Always try database function first
-        use_db_function = False
-        stats_data = {}
+        stats_query = supabase.table('calls')\
+            .select("sentiment, duration, tags")\
+            .order('id', desc=True)\
+            .limit(1000)
         
-        try:
-            stats_result = await asyncio.to_thread(
-                lambda: supabase.rpc('get_call_stats').execute()
-            )
-            if stats_result.data:
-                stats_data = stats_result.data
-                use_db_function = True
-        except Exception as e:
-            print(f"[API STATS] Database function failed: {e}, using fallback")
-            use_db_function = False
+        stats_response = await asyncio.to_thread(lambda: stats_query.execute())
+        all_data = stats_response.data or []
+        
+        total_calls = len(all_data)
+        pos_count = 0
+        neg_count = 0
+        neu_count = 0
+        total_duration = 0
+        valid_duration_count = 0
+        tag_counts = {"Support": 0, "Billing": 0, "Technical": 0, "Sales": 0}
+        
+        for c in all_data:
+            sent = (c.get('sentiment') or 'neutral').lower()
+            if sent == 'positive': 
+                pos_count += 1
+            elif sent == 'negative': 
+                neg_count += 1
+            else: 
+                neu_count += 1
 
-        if use_db_function:
-            # Stats already computed by database
-            stats = {
-                "sentiment": {
-                    "positive": stats_data.get('positive', 0),
-                    "negative": stats_data.get('negative', 0),
-                    "neutral": stats_data.get('neutral', 0)
-                },
-                "avg_duration": round(stats_data.get('avg_duration') or 0, 2),
-                "tag_counts": {
-                    "Support": stats_data.get('support', 0),
-                    "Billing": stats_data.get('billing', 0),
-                    "Technical": stats_data.get('technical', 0)
-                }
-            }
-        else:
-            # Fallback: Drastically reduce the limit
-            stats_query = supabase.table('calls')\
-                .select("sentiment, duration, tags")\
-                .order('id', desc=True)\
-                .limit(50)  # Reduced to 50 rows only
-            
-            stats_response = await asyncio.to_thread(run_query, stats_query)
-            all_data = stats_response.data or []
-            
-            # Calculate stats from limited dataset
-            stats = {
-                "sentiment": {"positive": 0, "negative": 0, "neutral": 0},
-                "avg_duration": 0,
-                "tag_counts": {"Support": 0, "Billing": 0, "Technical": 0}
-            }
-            
-            total_duration = 0
-            valid_duration_count = 0
-            
-            for c in all_data:
-                sent = (c.get('sentiment') or 'neutral').lower()
-                if sent == 'positive': 
-                    stats["sentiment"]["positive"] += 1
-                elif sent == 'negative': 
-                    stats["sentiment"]["negative"] += 1
-                else: 
-                    stats["sentiment"]["neutral"] += 1
+            dur = c.get('duration')
+            if dur is not None and dur > 0:
+                total_duration += dur
+                valid_duration_count += 1
 
-                dur = c.get('duration')
-                if dur is not None:
-                    total_duration += dur
-                    valid_duration_count += 1
-
-                tags = c.get('tags', [])
-                if tags:
-                    tags_lower = {tag.lower() for tag in tags}
-                    if 'support' in tags_lower or 'help' in tags_lower:
-                        stats["tag_counts"]["Support"] += 1
-                    if any(t in tags_lower for t in ['billing', 'payment', 'invoice']):
-                        stats["tag_counts"]["Billing"] += 1
-                    if any(t in tags_lower for t in ['technical', 'technical issue', 'error', 'bug']):
-                        stats["tag_counts"]["Technical"] += 1
-            
-            stats["avg_duration"] = round(total_duration / valid_duration_count, 2) if valid_duration_count > 0 else 0
+            tags = c.get('tags', [])
+            if tags:
+                tags_lower = {tag.lower() for tag in tags}
+                if 'support' in tags_lower or 'help' in tags_lower:
+                    tag_counts["Support"] += 1
+                if any(t in tags_lower for t in ['billing', 'payment', 'invoice']):
+                    tag_counts["Billing"] += 1
+                if any(t in tags_lower for t in ['technical', 'technical issue', 'error', 'bug']):
+                    tag_counts["Technical"] += 1
+                if 'sales' in tags_lower:
+                    tag_counts["Sales"] += 1
+        
+        pos_percent = round((pos_count / total_calls) * 100) if total_calls > 0 else 0
+        neg_percent = round((neg_count / total_calls) * 100) if total_calls > 0 else 0
+        neu_percent = round((neu_count / total_calls) * 100) if total_calls > 0 else 0
+        avg_duration = round(total_duration / valid_duration_count, 2) if valid_duration_count > 0 else 0
+        avg_seconds = int(round(total_duration / valid_duration_count)) if valid_duration_count > 0 else 0
+        
+        stats = {
+            "total_calls": total_calls,
+            "positive_count": pos_count,
+            "negative_count": neg_count,
+            "neutral_count": neu_count,
+            "positive_percent": pos_percent,
+            "negative_percent": neg_percent,
+            "neutral_percent": neu_percent,
+            "avg_duration": avg_duration,
+            "avg_duration_seconds": avg_seconds,
+            "sentiment": {
+                "positive": pos_count,
+                "negative": neg_count,
+                "neutral": neu_count
+            },
+            "tag_counts": tag_counts
+        }
 
         t_end = time.time()
-        print(f"[API STATS] Completed in {t_end - t_start:.4f}s")
+        print(f"[API STATS] Completed in {t_end - t_start:.4f}s - Total calls: {total_calls}, Pos: {pos_count}, Neg: {neg_count}, Neu: {neu_count}")
         return {"stats": stats}
 
     except Exception as e:

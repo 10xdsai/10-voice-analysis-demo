@@ -1849,12 +1849,16 @@ function updateStats(data) {
         }
     } else if (typeof data === 'object') {
         // Use real fields from globalStats if available
-        totalCallsCount = data.total_calls || totalCallsCount || 20;
+        totalCallsCount = data.total_calls !== undefined ? data.total_calls : (totalCallsCount || 0);
         if (totalEl) totalEl.textContent = totalCallsCount;
 
-        positivePercent = data.positive_percent !== undefined ? data.positive_percent : 65;
-        negativePercent = data.negative_percent !== undefined ? data.negative_percent : 25;
-        avgSeconds = data.avg_duration_seconds !== undefined ? data.avg_duration_seconds : 145;
+        const posCount = data.positive_count !== undefined ? data.positive_count : (data.sentiment?.positive || 0);
+        const negCount = data.negative_count !== undefined ? data.negative_count : (data.sentiment?.negative || 0);
+        const total = totalCallsCount || (posCount + negCount + (data.neutral_count !== undefined ? data.neutral_count : (data.sentiment?.neutral || 0)));
+
+        positivePercent = data.positive_percent !== undefined ? data.positive_percent : (total > 0 ? Math.round((posCount / total) * 100) : 0);
+        negativePercent = data.negative_percent !== undefined ? data.negative_percent : (total > 0 ? Math.round((negCount / total) * 100) : 0);
+        avgSeconds = data.avg_duration_seconds !== undefined ? data.avg_duration_seconds : Math.round(data.avg_duration || 0);
     }
 
     if (positiveEl) animateCounter(positiveEl, positivePercent, '%');
@@ -2036,10 +2040,20 @@ function initializeSentimentChart() {
 
     const ctx = canvas.getContext('2d');
 
-    // Use counts from globalStats if available
-    let positive = globalStats ? (globalStats.positive_count || 13) : 13;
-    let neutral = globalStats ? (globalStats.neutral_count || 2) : 2;
-    let negative = globalStats ? (globalStats.negative_count || 5) : 5;
+    // Use counts from globalStats if available, or compute from allCalls
+    let positive = 0;
+    let neutral = 0;
+    let negative = 0;
+
+    if (globalStats) {
+        positive = globalStats.positive_count !== undefined ? globalStats.positive_count : (globalStats.sentiment?.positive || 0);
+        neutral = globalStats.neutral_count !== undefined ? globalStats.neutral_count : (globalStats.sentiment?.neutral || 0);
+        negative = globalStats.negative_count !== undefined ? globalStats.negative_count : (globalStats.sentiment?.negative || 0);
+    } else if (allCalls && allCalls.length > 0) {
+        positive = allCalls.filter(c => (c.sentiment || '').toLowerCase() === 'positive').length;
+        neutral = allCalls.filter(c => (c.sentiment || '').toLowerCase() === 'neutral').length;
+        negative = allCalls.filter(c => (c.sentiment || '').toLowerCase() === 'negative').length;
+    }
     
     // Visible marker for debugging
     const chartTitle = document.querySelector('.chart-center-content .center-label');
@@ -2057,7 +2071,7 @@ function initializeSentimentChart() {
     const tooltipBorder = isDark ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0';
 
     // Calculate total and percentages
-    const total = positive + neutral + negative;
+    const total = globalStats?.total_calls || totalCallsCount || (positive + neutral + negative);
     const posPercent = total > 0 ? Math.round((positive / total) * 100) : 0;
     const neuPercent = total > 0 ? Math.round((neutral / total) * 100) : 0;
     const negPercent = total > 0 ? Math.round((negative / total) * 100) : 0;
